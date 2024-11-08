@@ -8,6 +8,17 @@ TC precipitation for the Rio Grande Basin, using a shapefile to subset geographi
 This is the second step in processing TC precipitation for the basin, after TC_swaths.py
 and should be executed before RGB_timeseries.py.
 
+DEPENDENCIES
+------------
+This script requires numpy, scipy, xarray, dask, dask-jobqueue, geopandas and shapely
+If you use anaconda, this is roughly how I created the environment for this. I am not
+making a .yml because honestly my anaconda installation is messed up and it probably
+wont work for anyone else and I cba to fix it:
+```
+    conda create -n rgb_tcs -c conda-forge numpy scipy xarray matplotlib cartopy basemap dask dask-jobqueue shapely pandas geopandas
+```
+This WILL NOT WORK without dask-jobqueue. Do not be fooled by the xarray default install of dask. It is not the same.
+
 ROUTINES
 --------
 * COMBINE_FILES : script will take TC swath netcdfs, which have been generated in TC_swaths.py
