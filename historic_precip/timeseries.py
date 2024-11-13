@@ -113,6 +113,8 @@ client.close()
 
 
 
+
+
 # now sum and average the data
 mon_sum = ds.resample(time='1M').sum(skipna=False)
 
