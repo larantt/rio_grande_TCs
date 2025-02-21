@@ -130,18 +130,18 @@ logging.basicConfig(level=logging.DEBUG,
 logger = logging.getLogger(__name__)
 
 ### GLOBALS ###
-COMBINE_FILES = None    # should be a filepath to the files that would otherwise be combined, True, or None
-ANNUAL_FILES = '/nfs/turbo/seas-hydro/laratt/historic_precip/combined_precip.pkl' # None of filepath to total precip with no TCs
+COMBINE_FILES = True    # should be a filepath to the files that would otherwise be combined, True, or None
+ANNUAL_FILES = None #'/nfs/turbo/seas-hydro/laratt/historic_precip/combined_precip.pkl' # None of filepath to total precip with no TCs
 REMOVE_TCS = False  # if True, subtract TCs out of data
 SUBSET_RGB = True   # if True, subset using the rio grande basin shapefile
 PARALLEL = True     # if True, subset files to RGB using dask parallelization
-outpath = '/nfs/turbo/seas-hydro/laratt/IMERG_3B/combined_precip' # where should combined precip files be saved
+outpath = '/nfs/turbo/seas-hydro/laratt/mswep/combined_precip' # where should combined precip files be saved
 
 # Path to the IMERG files and TC merged output
-imerg_daily_path = '/nfs/turbo/seas-hydro/laratt/IMERG_3B/total_precip'   # path to IMERG files
-swaths_path = '/nfs/turbo/seas-hydro/laratt/TCdata/precip_swaths/IMERG_3B_TIMES_REPAIRED/' # paths to TC swaths
-output_path = '/nfs/turbo/seas-hydro/laratt/IMERG_3B/precip_removed'    # where to output files with TC precip removed
-output_annual = '/nfs/turbo/seas-hydro/laratt/IMERG_3B/combined_precip' # where to output annual precip files
+imerg_daily_path = '/nfs/turbo/seas-hydro/laratt/mswep/total_precip'   # path to IMERG files
+swaths_path = '/nfs/turbo/seas-hydro/laratt/TCdata/precip_swaths/mswep_TIMES_REPAIRED/' # paths to TC swaths
+output_path = '/nfs/turbo/seas-hydro/laratt/mswep/precip_removed'    # where to output files with TC precip removed
+output_annual = '/nfs/turbo/seas-hydro/laratt/mswep/combined_precip' # where to output annual precip files
 rgb_shp_path = '/nfs/turbo/seas-hydro/laratt/TCdata/shapefiles/RG_Watershed_Boundary-shp/RG_Watershed_Boundary.shp' # where is the shapefile for the basin
 
 def gen_mask(yearly_data, shpfile):
@@ -291,7 +291,7 @@ if __name__ == '__main__':
         # (NOTE: this should be parallelized better than just chunking w dask soon)
         if COMBINE_FILES == True:
             # if True, will combine all the swaths into a single file
-            data_directory = '/nfs/turbo/seas-hydro/laratt/TCdata/precip_swaths/IMERG_3B_TIMES_REPAIRED'
+            data_directory = '/nfs/turbo/seas-hydro/laratt/TCdata/precip_swaths/mswep'
             # list all the TC swath files for IMERG-3B (make flexible in future)
             datasets = [xr.open_dataset(os.path.join(data_directory, filename)) for filename in os.listdir(data_directory) if filename.endswith('.nc')]
             # combine the datasets, start with data at 0

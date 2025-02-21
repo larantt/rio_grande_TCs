@@ -15,6 +15,7 @@ from shapely.geometry import Point
 from matplotlib.ticker import MaxNLocator, FuncFormatter     
 from dask.distributed import Client, LocalCluster
 import matplotlib.dates as mdates
+import cmasher as cmr
 
 IBM_BLUE = "#648FFF"
 IBM_PURPLE = "#785EF0"
@@ -22,10 +23,12 @@ IBM_PINK = "#DC267F"
 IBM_ORANGE = "#FE6100"
 IBM_YELLOW = "#FFB000"
 
+OCEAN = 'cmr.ocean_r'
+FALL = 'cmr.fall_r'
 # Set up a local Dask cluster
 cluster = LocalCluster()
 client = Client(cluster)
-print(client)  # This will output the dashboard link
+#print(client)  # This will output the dashboard link
 
 def gen_mask(yearly_data, shpfile):
     """
@@ -84,13 +87,16 @@ def plot_cartopy(ax, data, title, cmap='Blues', vmax=50, vmin=0, levs=11):
     # get spacing
     space = vmax/(levs-1)
     # Define the color levels for the colorbar (increments of 5 from 0 to 50)
-    levels = np.arange(vmin, vmax + space, space).tolist()  # Levels from 0 to 50 in increments of 5
+    if isinstance(levs,int):
+        levels = np.arange(vmin, vmax + space, space).tolist()  # Levels from 0 to 50 in increments of 5
     
-    # Create the colormap (Blues)
-    cmap = plt.get_cmap(cmap, levs + 1)  # Get the 'Blues' colormap with 'levs' number of colors
-    colors = [cmap(i) for i in range(cmap.N)]  # Generate the colormap colors
-    new_cmap = mcolors.ListedColormap(colors)  # Create a new colormap
-
+        # Create the colormap (Blues)
+        cmap = plt.get_cmap(cmap, levs + 1)  # Get the 'Blues' colormap with 'levs' number of colors
+        colors = [cmap(i) for i in range(cmap.N)]  # Generate the colormap colors
+        new_cmap = mcolors.ListedColormap(colors)  # Create a new colormap
+    else:
+        new_cmap = cmap
+        levels = levs
     # Plot the total precipitation swath
     p = ax.contourf(
         data.lon, data.lat, data.T,
@@ -374,7 +380,59 @@ def plot_resets(ax,resets=['2008-10-08','2008-10-28','2009-02-28'],yscale=4.6e6,
              rotation=90,
              color='darkgrey')
 
-# falcon 91.7 meters
+### Define function to create gridded counts for a dataframe of TC centres ###
+def create_regional_grid(df, mask=None, grid_size=2.5, edges=None):
+    """
+    Creates a grid of a certain degree size over the regional model and determines
+    the counts of TC centres in each new grid cell
+
+    Parameters
+    -----------
+    df : pd.Dataframe
+        data containing the TC centroids
+    mask : np.ndarray
+        2D histogram to mask the data
+    grid_size : float
+        size of lat lon grid bins in degrees
+
+    edges : list
+        list containing [min latitude, max latitude, min longitude, max longitude]
+    Returns
+    --------
+    counts : np.ndarray
+        2 dimensional histogram showing the counts of TC centres in each grid cell
+    """
+    # Define the size of the grid cells
+    grid_step = grid_size
+
+    # if not provided calculate the grid
+    if edges:
+        lat_min, lat_max, lon_min, lon_max = edges[0], edges[1], edges[2], edges[3]
+    else:
+        lat_max, lat_min = df.lat.min(), df.lat.max()
+        lon_max, lon_min = df.lon.min(), df.lon.max()
+
+    # Create the latitude and longitude edges
+    lat_edges = np.arange(lat_min, lat_max + grid_step, grid_step)
+    lon_edges = np.arange(lon_min, lon_max + grid_step, grid_step)
+
+    # store counts in histogram 2D grid
+    # NEED TO ADD A CHECK TO POPULATE IDENTICAL HISTOGRAM WITH 0s IF NO DATA
+    if len(df) == 0:
+        counts = np.zeros((len(lat_edges) - 1, len(lon_edges) - 1))
+
+    else:
+        counts, _, _ = np.histogram2d(df['lat'], df['lon'], bins=[lat_edges, lon_edges])
+
+    # if there is a mask, mask the histogram to the irregular shape
+    if 'mask' in locals():
+        try:
+            counts = np.ma.masked_where(mask == 0, counts)
+        except:
+            raise(AttributeError(f"Mask provided invalid. Ensure a 2D histogram with shape {np.shape(counts)} is provided.\n Provided mask shape: {np.shape(mask)}"))
+
+    return counts
+
 # read in datasets
 fp_precip = '/nfs/turbo/seas-hydro/laratt/IMERG_3B/combined_precip'
 SHP_RGB = '/nfs/turbo/seas-hydro/laratt/TCdata/shapefiles/RG_Watershed_Boundary-shp/RG_Watershed_Boundary.shp'
@@ -393,6 +451,8 @@ mexico_data = ds.where(mask_xr)
 # Step 1: Resample to get monthly precipitation sums
 ds_monthly_sum = ds.resample(time='1ME').sum()
 ds_annual_sum = ds.resample(time='1YE').sum()
+mx_annual_sum = mexico_data.resample(time='1YE').sum()
+print('Sums calculated')
 
 # Step 2: Calculate the long-term mean of these monthly sums
 ds_monthly_mean = ds_monthly_sum.groupby('time.month').mean('time')
@@ -421,6 +481,7 @@ rivers = [amistad_elev,falcon_elev,laboq_elev]
 cleaned_rivers = {name:clean_IBWC_csvs(river) for name, river in zip(names,rivers)}
 cleaned_deliveries = {'Deliveries (TCM)':clean_IBWC_csvs(deliveries)}
 targets = clean_IBWC_csvs(targets,end='2025-10-24')
+print('Data cleaned')
 
 # define the capacities (TCM)
 cons_storage = {'Amistad':3980096,
@@ -444,171 +505,72 @@ mexico_basin_precip = {'time':mexico_data.time.values,
 
 """
 
-
-
-# now make better plot for choice water cycles
-
 #### FINAL PROJECT FIGURES ####
-# 1. TC Track Density & Trend in TC tracks affecting RGB basin (split bar by hurricane basin)
-# 2. TC percentage contribution to precipitation in basin (average, median, 95th pctl) & total TC precip
-# 3. Example delivery cycles w precipitation timeseries, reservoir storage
-# 4. Example delivery cycles w precipitation timeseries, total deliveries to US
-# 5. Correlation between total TC precipitation and total deliveries vs non TC precipitation and total deliveries
-# 6. Maybe an artifical gauge network &/or plots from Mo's class?
-# 7. V's vertical delivery timeseries vs target, but with %age TC contribution overlaid
-# 8. correlation between elevation change at each reservoir and TC occurrence
-
-
-#### Spatial Plots ####
-
-
-#### Timeseries Plots ####
-figa, axa = plt.subplots(2,1,figsize=(18,8))
-# precipitation contribution in mexican portion of basin
-mexico_TCs = mexico_data.total - mexico_data.precipitation
-# get the means
-monthly_mexico_TCs = mexico_TCs.resample(time='1ME').mean().mean(dim=('lat', 'lon'))
-monthly_mexico_precip = mexico_data.total.resample(time='1MS').mean().mean(dim=('lat', 'lon'))
-axa[0].plot(monthly_mexico_TCs.time,monthly_mexico_TCs.values)
-axa[1].plot(monthly_mexico_precip.time,monthly_mexico_precip.values)
-
-
-
-
+print('Generating Figures')
+## WATER RESOURCES ###
 #### Example delivery cycles vs reservoir storage #####
-fig1, ax1 = plt.subplots(1,1,figsize=(18,8)) # 2002-10-01 to 2007-09-30
+fig1, (ax1,ax1b) = plt.subplots(2,1,figsize=(18,8)) # 2002-10-01 to 2007-09-30
 elevation_vs_precip(cleaned_rivers,mexico_data,ax=ax1,start_time='2002-09-01',nonTC=True,capacities=cons_storage)
 plot_resets(ax1,['2002-10-01'],yscale=3e6,dday=4)
-ax1.legend(ncols=10, frameon=False, loc='upper left',bbox_to_anchor=(0.21,1.045))
-fig1.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/just_mexico/reservoirs_2002-10-01_2007-09-30.png")
+ax1.legend(ncols=10, frameon=False, loc='upper left',bbox_to_anchor=(0.31,1.09))
 
-
+elevation_vs_precip(cleaned_deliveries,mexico_data,ax=ax1b,ylab='Deliveries (TCM)',title='Mexican Basin TC Precipitation vs Cumulative Deliveries',
+                    start_time='2002-09-01',nonTC=True,target=[('2002-09-01','2002-10-01'),('2002-10-01','2007-09-30')])
+plot_targets(targets=targets,start_date='2002-09-01',ax=ax1b,resets=['2002-10-01'],yscale=2.1e6,dday=4)
+ax1b.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.67,1.09))
+fig1.tight_layout()
+fig1.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/just_mexico/combined_2002-10-01_2007-09-30.png",dpi=1000)
+fig1.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/just_mexico/combined_2002-10-01_2007-09-30.svg",dpi=1200)
+#################################
 fig2, (ax2,ax2b) = plt.subplots(2,1,figsize=(18,8),sharex=True) # 2007-10-01 - 10-08-2008, 07-13-2010 to 10-24-2010
 elevation_vs_precip(cleaned_rivers,mexico_data,ax=ax2,start_time='2007-10-01',end_time='2010-10-24',nonTC=True,capacities=cons_storage)
 plot_resets(ax2)
-ax2.legend(ncols=10, frameon=False, loc='upper left',bbox_to_anchor=(0.31,1.095))
+ax2.legend(ncols=10, frameon=False, loc='upper left',bbox_to_anchor=(0.31,1.09))
 
 elevation_vs_precip(cleaned_deliveries,mexico_data,ax=ax2b,ylab='Cumulative Cycle Deliveries (TCM)',
                     start_time='2007-10-01',end_time='2010-10-24',nonTC=True,title='Mexican Basin TC Precipitation vs Cumulative Deliveries',
                     target=[('2007-10-01','2008-10-08'),('2008-10-08','2008-10-28'),('2008-10-28','2009-02-28'),('2009-02-28','2010-10-24')])
 # '2008-08-10','2008-10-28','2009-02-28'
 plot_targets(targets=targets,start_date='2007-10-01',end_date='2010-10-24',ax=ax2b,resets=['2008-10-08','2008-10-28','2009-02-28'],yscale=2.0e6,dday=4)
-ax2b.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.67,1.095))
+ax2b.legend(ncols=10, frameon=False, loc='upper left',bbox_to_anchor=(0.67,1.09))
 fig2.tight_layout()
+fig2.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/just_mexico/combined_2007-10-01_2010-10-24.png",dpi=1000)
+fig2.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/just_mexico/combined_2007-10-01_2010-10-24.svg",dpi=1200)
 
-fig2.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/just_mexico/combined_2007-10-01_2010-10-24.png")
+#################################
+fig3, (ax3,ax3a) = plt.subplots(2,1,figsize=(18,8)) # 2007-10-01 - 10-08-2008, 07-13-2010 to 10-24-2010
+elevation_vs_precip(cleaned_rivers,mexico_data,ax=ax3,start_time='2010-10-25',end_time='2015-10-25',nonTC=True,capacities=cons_storage)
+plot_resets(ax3)
+ax3.legend(ncols=10, frameon=False, loc='upper left',bbox_to_anchor=(0.31,1.09))
 
-fig8, ax8 = plt.subplots(1,1,figsize=(18,8)) # 2007-10-01 - 10-08-2008, 07-13-2010 to 10-24-2010
-elevation_vs_precip(cleaned_rivers,mexico_data,ax=ax8,start_time='2010-10-25',end_time='2015-10-25',nonTC=True,capacities=cons_storage)
-plot_resets(ax8)
-ax8.legend(ncols=10, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
-fig8.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/just_mexico/reservoirs_2010-10-25_2015-10-25.png")
-
-
-#### Cumulative Plots for each cycle with precip ####
-fig9, ax9 = plt.subplots(1,1,figsize=(18,8)) # 2002-10-01 to 2007-09-30
-elevation_vs_precip(cleaned_deliveries,mexico_data,ax=ax9,ylab='Deliveries (TCM)',title='Mexican Basin TC Precipitation vs Cumulative Deliveries',
+elevation_vs_precip(cleaned_deliveries,mexico_data,ax=ax3a,ylab='Deliveries (TCM)',title='Mexican Basin TC Precipitation vs Cumulative Deliveries',
                     start_time='2010-10-25',end_time='2015-10-25',nonTC=True,target=[('2010-10-25','2015-10-25')])
-plot_targets(targets=targets,start_date='2010-10-25',end_date='2015-10-24',ax=ax9,yscale=2.1e6,dday=4,resets=None)
-ax9.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
-#shade_by_index(ax5,MEI,start_time='2002-09-01')
-fig9.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/just_mexico/cumulative_deliveries_2010-10-25_2015-10-25.png")
+plot_targets(targets=targets,start_date='2010-10-25',end_date='2015-10-24',ax=ax3a,yscale=2.1e6,dday=4,resets=None)
+ax3a.legend(ncols=10, frameon=False, loc='upper left',bbox_to_anchor=(0.67,1.09))
+fig3.tight_layout()
+fig3.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/just_mexico/combined_2010-10-25_2015-10-25.png",dpi=1000)
+fig3.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/just_mexico/combined_2010-10-25_2015-10-25.svg",dpi=1200)
+#################################
+### SPATIAL PLOTS ####
+# 1. 2 subplots - mean annual precip, mean annual TC % contribution, (total TC track density)
+pct_contrib_annual = ((ds_annual_sum['total'] - ds_annual_sum['precipitation'])/ds_annual_sum['total']) * 100
+pct_contrib_total = ((ds_annual_sum['total'].sum(dim='time') - ds_annual_sum['precipitation'].sum(dim='time'))/ds_annual_sum['total'].sum(dim='time') )* 100
+
+fig4,(ax4a,ax4b) = plt.subplots(1,2,figsize=(18,8),subplot_kw={'projection':ccrs.PlateCarree()})
+#levels_fig4a = [0,100,200,400,600,800,1000,1200,1400]
+ax4a.set_extent([-115.485103, -96.017329, 22.412489, 41.624836], crs=ccrs.PlateCarree())
+ax4b.set_extent([-115.485103, -96.017329, 22.412489, 41.624836], crs=ccrs.PlateCarree())
+pa = plot_cartopy(ax4a, ds_annual_sum['total'].mean(dim='time'), f'Rio Grande Average Annual Precipitation (2000-2019)',cmap='cmr.ocean_r',levs=np.arange(0,1450,50),vmax=800)
+cb4a = fig4.colorbar(pa, ax=ax4a, extend='max',label='Precipitation (mm)',orientation='horizontal',shrink=0.55,pad=0.07)
+
+pb = plot_cartopy(ax4b, pct_contrib_total, f'Percentage Contribution of TCs to Total Precipitation (2000-2019)',cmap='cmr.bubblegum_r',levs=np.arange(0,14,1),vmax=12)
+cb4b = fig4.colorbar(pb, ax=ax4b, extend='max',label='Contribution (%)',orientation='horizontal',shrink=0.55,pad=0.07)
+fig4.tight_layout()
+plt.subplots_adjust(wspace=-0.3, hspace=-0.3)
+fig4.savefig('/nfs/turbo/seas-hydro/laratt/historic_precip/figures/spatial/rainfall_avg_2.png',dpi=1000)
+fig4.savefig('/nfs/turbo/seas-hydro/laratt/historic_precip/figures/spatial/rainfall_avg_2.svg',dpi=1200)
+
+# 2. 2 subplots - same as figure 1 but with trends in contribution
 
 
-#### Example delivery cycles vs total deliveries #####
-fig3, ax3 = plt.subplots(1,1,figsize=(18,8)) # 2002-10-01 to 2007-09-30
-elevation_vs_precip(cleaned_deliveries,mexico_data,ax=ax3,ylab='Deliveries (m^3/day)',start_time='2002-09-01',nonTC=True)
-plot_resets(ax3,['2002-10-01'],yscale=3.2e7,dday=4)
-ax3.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
-#shade_by_index(ax3,MEI,start_time='2002-09-01')
-fig3.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/deliveries_2002-10-01_2007-09-30.png")
-
-fig4, ax4 = plt.subplots(1,1,figsize=(18,8)) # 2007-10-01 - 10-08-2008, 07-13-2010 to 10-24-2010
-elevation_vs_precip(cleaned_deliveries,mexico_data,ax=ax4,start_time='2007-10-01',nonTC=True,
-                    end_time='2010-10-24',ylab='Deliveries (m^3/day)',title='Mexico Basin TC Precipitation vs Deliveries')
-plot_resets(ax4,yscale=0.8e8)
-ax4.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
-#shade_by_index(ax4,MEI,start_time='2007-10-01',end_time='2010-10-24')
-fig4.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/just_mexico/deliveries_2007-10-01_2010-10-24.png")
-
-#### Cumulative Plots for each cycle with precip ####
-fig5, ax5 = plt.subplots(1,1,figsize=(18,8)) # 2002-10-01 to 2007-09-30
-elevation_vs_precip(cleaned_deliveries,mexico_data,ax=ax5,ylab='Deliveries (TCM)',title='Mexican Basin TC Precipitation vs Cumulative Deliveries',
-                    start_time='2002-09-01',nonTC=True,target=[('2002-09-01','2002-10-01'),('2002-10-01','2007-09-30')])
-plot_targets(targets=targets,start_date='2002-09-01',ax=ax5,resets=['2002-10-01'],yscale=2.1e6,dday=4)
-ax5.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
-#shade_by_index(ax5,MEI,start_time='2002-09-01')
-fig5.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/just_mexico/cumulative_deliveries_2002-10-01_2007-09-30.png")
-
-
-fig6, ax6 = plt.subplots(1,1,figsize=(18,8)) # 2002-10-01 to 2007-09-30
-elevation_vs_precip(cleaned_deliveries,mexico_data,ax=ax6,ylab='Cumulative Cycle Deliveries (TCM)',
-                    start_time='2007-10-01',end_time='2010-10-24',nonTC=True,title='Mexican Basin TC Precipitation vs Cumulative Deliveries',
-                    target=[('2007-10-01','2008-08-10'),('2008-08-10','2008-10-28'),('2008-10-28','2009-02-28'),('2009-02-28','2010-10-24')])
-# '2008-08-10','2008-10-28','2009-02-28'
-plot_targets(targets=targets,start_date='2007-10-01',end_date='2010-10-24',ax=ax6,resets=['2008-08-10','2008-10-28','2009-02-28'],yscale=2.0e6,dday=4)
-ax6.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
-#shade_by_index(ax5,MEI,start_time='2002-09-01')
-fig6.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/just_mexico/cumulative_deliveries_2007-10-01_2010-10-24.png")
-
-
-#### Correlation Plots ####
-
-#client.close()
-
-
-
-
-
-
-#### Example delivery cycles vs reservoir storage #####
-fig1, ax1 = plt.subplots(1,1,figsize=(18,8)) # 2002-10-01 to 2007-09-30
-elevation_vs_precip(cleaned_rivers,ds,ax=ax1,start_time='2002-09-01',nonTC=True,title='Total Basin TC Precipitation vs Reservoir Levels')
-plot_resets(ax1,['2002-10-01'],yscale=3e6,dday=4)
-ax1.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
-fig1.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/full_basin/reservoirs_2002-10-01_2007-09-30.png")
-
-
-fig2, ax2 = plt.subplots(1,1,figsize=(18,8)) # 2007-10-01 - 10-08-2008, 07-13-2010 to 10-24-2010
-elevation_vs_precip(cleaned_rivers,ds,ax=ax2,start_time='2007-10-01',end_time='2010-10-24',nonTC=True,title='Total Basin TC Precipitation vs Reservoir Levels')
-plot_resets(ax2)
-ax2.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
-fig2.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/full_basin/reservoirs_2007-10-01_2010-10-24.png")
-
-
-#### Example delivery cycles vs total deliveries #####
-fig3, ax3 = plt.subplots(1,1,figsize=(18,8)) # 2002-10-01 to 2007-09-30
-elevation_vs_precip(cleaned_deliveries,ds,ax=ax3,ylab='Deliveries (m^3/day)',start_time='2002-09-01',nonTC=True,title='Total Basin TC Precipitation vs Deliveries')
-plot_resets(ax3,['2002-10-01'],yscale=3.2e7,dday=4)
-ax3.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
-#shade_by_index(ax3,MEI,start_time='2002-09-01')
-fig3.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/full_basin/deliveries_2002-10-01_2007-09-30.png")
-
-fig4, ax4 = plt.subplots(1,1,figsize=(18,8)) # 2007-10-01 - 10-08-2008, 07-13-2010 to 10-24-2010
-elevation_vs_precip(cleaned_deliveries,ds,ax=ax4,start_time='2007-10-01',nonTC=True,
-                    end_time='2010-10-24',ylab='Deliveries (m^3/day)',title='Total Basin TC Precipitation vs Total Deliveries to US')
-plot_resets(ax4,yscale=0.8e8)
-ax4.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
-#shade_by_index(ax4,MEI,start_time='2007-10-01',end_time='2010-10-24')
-fig4.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/full_basin/deliveries_2007-10-01_2010-10-24.png")
-
-#### Cumulative Plots for each cycle with precip ####
-fig5, ax5 = plt.subplots(1,1,figsize=(18,8)) # 2002-10-01 to 2007-09-30
-elevation_vs_precip(cleaned_deliveries,ds,ax=ax5,ylab='Deliveries (TCM)',title='Total Basin TC Precipitation vs Cumulative Deliveries',
-                    start_time='2002-09-01',nonTC=True,target=[('2002-09-01','2002-10-01'),('2002-10-01','2007-09-30')])
-plot_targets(targets=targets,start_date='2002-09-01',ax=ax5,resets=['2002-10-01'],yscale=2.1e6,dday=4)
-ax5.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
-#shade_by_index(ax5,MEI,start_time='2002-09-01')
-fig5.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/full_basin/cumulative_deliveries_2002-10-01_2007-09-30.png")
-
-
-fig6, ax6 = plt.subplots(1,1,figsize=(18,8)) # 2002-10-01 to 2007-09-30
-elevation_vs_precip(cleaned_deliveries,ds,ax=ax6,ylab='Cumulative Cycle Deliveries (TCM)',
-                    start_time='2007-10-01',end_time='2010-10-24',nonTC=True,title='Total Basin TC Precipitation vs Cumulative Deliveries',
-                    target=[('2007-10-01','2008-08-10'),('2008-08-10','2008-10-28'),('2008-10-28','2009-02-28'),('2009-02-28','2010-10-24')])
-# '2008-08-10','2008-10-28','2009-02-28'
-plot_targets(targets=targets,start_date='2007-10-01',end_date='2010-10-24',ax=ax6,resets=['2008-08-10','2008-10-28','2009-02-28'],yscale=2.0e6,dday=4)
-ax6.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
-#shade_by_index(ax5,MEI,start_time='2002-09-01')
-fig6.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/full_basin/cumulative_deliveries_2007-10-01_2010-10-24.png")
-
+# 3. alternate figures for poster

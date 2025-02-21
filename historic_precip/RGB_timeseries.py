@@ -1,23 +1,4 @@
-#usr/bin/env python3
-
-"""
-RGB_timeseries.py 
-
-Creates a timeseries of precipitation in the Rio Grande Basin using a 
-from a specified product, then removes TC precipitation swaths created in
-the TC_swaths.py script from the historical record.
-
-Final output generated:
-1. monthly timeseries plots of accumulated TC precipitation in the basin
-2. timeseries of all precipitation in the RGB
-    1. total average
-    2. spatial average
-3. timeseries of all non TC precipitation in the RGB
-"""
-
-#############
-## IMPORTS ##
-#############
+import time
 import numpy as np
 import xarray as xr
 import pandas as pd
@@ -33,156 +14,284 @@ import os
 import matplotlib.colors as mcolors
 from shapely.geometry import Point
 import dask
+from dask.distributed import Client, LocalCluster
 
-#############
-## GLOBALS ##
-#############
 
-# filepaths to necessary data sources
-PRECIP_PRODUCT = "IMERG_3B"                                                                  # name of precipiation product
-SWATHS_PATH = f"/nfs/turbo/seas-hydro/laratt/TCdata/precip_swaths/{PRECIP_PRODUCT}"          # path to the precipitation swaths
-PRECIP_PATH = f"/nfs/turbo/seas-hydro/laratt/{PRECIP_PRODUCT}"                               # path to the precipitation product
+
+# read in datasets
+fp_precip = '/nfs/turbo/seas-hydro/laratt/IMERG_3B/combined_precip'
 SHP_RGB = '/nfs/turbo/seas-hydro/laratt/TCdata/shapefiles/RG_Watershed_Boundary-shp/RG_Watershed_Boundary.shp'
-EBT_AL = '/nfs/turbo/seas-hydro/laratt/TCdata/track_files/EBTRK_AL_final_1851-2021_new_format_02-Sep-2022-1.txt'
-EBT_EP = '/nfs/turbo/seas-hydro/laratt/TCdata/track_files/EBTRK_EP_final_1949-2021_new_format_02-Sep-2022.txt'
+# read in data
+ds = xr.open_mfdataset(f'{fp_precip}/precipitation*.nc')
+#ds = xr.open_dataset(f'{fp_precip}/precipitation_2010.nc')
 
-# globals for swath extraction
-SOURCE = 'IMERG 3B'        # precipitation product being used
-TC_RADIUS = 500            # radius in km about which to extract TC precip
-PREC_VAR = 'precipitation' # variable in precipitation data for precip
-LAT_VAR = 'lat'            # variable for latitude in precipitation data
-LON_VAR = 'lon'            # variable for longitude in precipitation data
-START_YR = 2000            # year to start data extraction
-END_YR = 2020              # year to end data extraction
-STORM_ID = None            # run test for individual TC - use the ATCF ID from the EBTRAK dataset (e.g. 'AL012010' for Alex 2010)
-TIMESERIES = "monthly"     # how to do the time series: "annual", "monthly", or "daily"
-WRITE_PRECIP = True       # should precip files be written to disk
-PLOT_ALL_SWATHS = False     # should a plot of all swaths be made?
-EXTRACT_MASK = True
 
-rgb_shp = gpd.read_file(SHP_RGB)
-# first open ALL precipitation from IMERG
-total_precip = xr.open_mfdataset(f'{PRECIP_PATH}/total_precip/*')
-# then open precipitation without TCs
-# search for matching times, open TCREMOVED, average with TCREMOVED_2 if exists
+# now sum and average the data
+mon_sum = ds.resample(time='1M').sum(skipna=False)
 
-precip_masked = xr.open_dataset('/nfs/turbo/seas-hydro/laratt/historic_precip/rgb_imerg3b.nc')
-swaths_masked = xr.open_dataset('/nfs/turbo/seas-hydro/laratt/historic_precip/rgb_imerg3b_swaths.nc')
-updated_precip_masked = xr.open_dataset('/nfs/turbo/seas-hydro/laratt/historic_precip/rgb_imerg3b_swaths_removed.nc')
+# figures to make - monthly timeseries in each sub basin, esp conchos
+# spatial plot for monthly mean precip (precip without - precip with)
+# spatial plot for 95th percentile precip (precip without - precip with)
 
-mon_sum_total = precip_masked.resample(time='1M').sum(skipna=False)
-mon_sum_no_TC = updated_precip_masked.resample(time='1M').sum(skipna=False)
+basin_total = mon_sum.sum(dim=('lat','lon'))
+basin_avg = mon_sum.mean(dim=('lat','lon'))
 # take average of days with two tracks (should do this more thoroughly later)
-swaths_masked_aligned = swaths_masked.groupby('time').mean(dim='time', skipna=False)
-mon_sum_TC_only = swaths_masked_aligned.resample(time='1M').sum(skipna=False)
-    
-# now take a basin-wide sum and average for each month
-basin_total = mon_sum_total.sum(dim=('lat','lon'))
-basin_total_no_TC = mon_sum_no_TC.sum(dim=('lat','lon'))
-basin_total_TC_only = mon_sum_TC_only.sum(dim=('lat','lon'))
+#swaths_masked_aligned = swaths_masked.groupby('time').mean(dim='time', skipna=False)
+#mon_sum_TC_only = swaths_masked_aligned.resample(time='1M').sum(skipna=False)
 
-basin_avg = mon_sum_total.mean(dim=('lat','lon'))
-basin_avg_no_TC = mon_sum_no_TC.mean(dim=('lat','lon'),skipna=True)
-basin_avg_TC_only = mon_sum_TC_only.mean(dim=('lat','lon'))
-
-
+# now make plots
 fig, ax = plt.subplots(2,1,figsize=(12,8))
 # first plot the basin monthly totals
-ax[0].plot(basin_total.time.values,basin_total.precipitation.values,c='#648FFF',label='Total Accumulated Precip')
-ax[0].plot(basin_total_no_TC.time.values,basin_total_no_TC.precipitation.values,c='#DC267F',label='No TCs')
-ax[0].set_xlim(basin_total_TC_only.time.min(),basin_total_TC_only.time.max())
+ax[0].plot(basin_total.time.values,basin_total.precipitation.values,c='#648FFF',label='Accumulated Precip, TCs Removed',lw=1.5)
+ax[0].plot(basin_total.time.values,basin_total.total.values,c='#DC267F',label='Accumulated Precip', lw=1.5)
+ax[0].set_xlim(basin_total.time.min(),basin_total.time.max())
 ax[0].set_ylabel('Total Precipitation (mm/day)')
 ax[0].legend()
 ax[0].set_title(f'IMERG 3b Total Monthly Precipitation in Rio Grande Basin (Jun 2000-Dec 2020)',loc='left',fontweight='bold',fontsize=16)
 # next plot the basin monthly averages
-ax[1].plot(basin_avg.time.values,basin_avg.precipitation.values,c='#648FFF',label='Average Accumulated Precip')
-ax[1].plot(basin_avg_no_TC.time.values,basin_avg_no_TC.precipitation.values,c='#DC267F',label='No TCs')
-ax[1].set_xlim(basin_avg_TC_only.time.min(),basin_avg_TC_only.time.max())
+ax[1].plot(basin_avg.time.values,basin_avg.precipitation.values,c='#648FFF',label='Average Accumulated Precip, TCs Removed',lw=1.5)
+ax[1].plot(basin_avg.time.values,basin_avg.total.values,c='#DC267F',label='Average Accumulated Precip',lw=1.5)
+ax[1].set_xlim(basin_avg.time.min(),basin_avg.time.max())
 ax[1].legend()
 ax[1].set_ylabel('Average Precipitation (mm/day)')
 ax[1].set_title(f'IMERG 3b Average Monthly Precipitation in Rio Grande Basin (Jun 2000-Dec 2020)',loc='left',fontweight='bold',fontsize=16)
 fig.savefig('basin_total_precip.png')
 
+# not averaged
+# now make plots
+fig, ax = plt.subplots(2,1,figsize=(30,5))
+basin_total_day = ds.sum(dim=('lat','lon'))
+basin_avg_day = ds.mean(dim=('lat','lon'))
+# first plot the basin monthly totals
+ax[0].plot(basin_total_day.time.values,basin_total_day.precipitation.values,c='#648FFF',label='Accumulated Precip, TCs Removed',lw=1.5)
+ax[0].plot(basin_total_day.time.values,basin_total_day.total.values,c='#DC267F',label='Accumulated Precip', lw=1.5)
+ax[0].set_xlim(basin_total_day.time.min(),basin_total_day.time.max())
+ax[0].set_ylabel('Total Precipitation (mm/day)')
+ax[0].legend()
+ax[0].set_title(f'IMERG 3b Total Monthly Precipitation in Rio Grande Basin (Jun 2000-Dec 2020)',loc='left',fontweight='bold',fontsize=16)
+# next plot the basin monthly averages
+ax[1].plot(basin_avg_day.time.values,basin_avg_day.precipitation.values,c='#648FFF',label='Average Accumulated Precip, TCs Removed',lw=1.5)
+ax[1].plot(basin_avg_day.time.values,basin_avg_day.total.values,c='#DC267F',label='Average Accumulated Precip',lw=1.5)
+ax[1].set_xlim(basin_avg_day.time.min(),basin_avg_day.time.max())
+ax[1].legend()
+ax[1].set_ylabel('Average Precipitation (mm/day)')
+ax[1].set_title(f'IMERG 3b Average Monthly Precipitation in Rio Grande Basin (Jun 2000-Dec 2020)',loc='left',fontweight='bold',fontsize=16)
+fig.savefig('basin_total_precip_daily.png')
+
+# now make spatial plots for each year
+fig3, ax3 = plt.subplots(1,1,figsize=(12,8),subplot_kw={'projection': ccrs.PlateCarree()})
 
 
-if PLOT_ALL_SWATHS:
-    # set the bbox for the rio grande valley
-    lon_min, lat_min, lon_max, lat_max = -121.98, 20.66, -84.64, 40.68
-    # Create a figure for plotting
-    fig, ax = plt.subplots(figsize=(12, 8), subplot_kw={'projection': ccrs.PlateCarree()})
-
-    # Add map features
-    ax.coastlines()
-    # Set the extent of the map to the bounding box
-    ax.set_extent([lon_min, lon_max, lat_min, lat_max], crs=ccrs.PlateCarree())
-
-    # Calculate the sum of precipitation across time dimension
-    total_precipitation = updated_precip_masked.sum(dim='time')
-    # total_precipitation = precip_masked.mean(dim='time')
-
-    # Define the levels (start from 1 mm up to 1500 mm, with the last level for > 1500 mm)
-    levels = [0] + np.linspace(1, 1000, num=20).tolist() + [1500]  # Explicitly add 0 and 2000
-
-    # Create a colormap where the first color (for 0 mm) is white, and others are from 'Blues'
-    cmap = plt.get_cmap('Blues', 20)  # Get a colormap with 20 levels
-    colors = [(1, 1, 1)] + [cmap(i) for i in range(cmap.N)]  # Add white as the first color
-    new_cmap = mcolors.ListedColormap(colors)  # Create a new colormap with white at the start
-
-    # Create a normalization so that 0 is white and 1+ mm gets colors from the colormap
-    norm = mcolors.BoundaryNorm(boundaries=levels, ncolors=new_cmap.N)
 
 
-    # Plot the total precipitation swath
-    p = ax.contourf(
-        total_precipitation.lon, total_precipitation.lat, total_precipitation.T,
-        transform=ccrs.PlateCarree(),  # Transform coordinates
-        cmap=new_cmap,  # Use the custom colormap
-        levels=levels,  # Use the defined levels
-        alpha=0.9,  # Set transparency
-        norm=norm  # Apply the normalization
-    )
-
-    # Add the colorbar and ensure it extends beyond 1500
-    cbar = plt.colorbar(p, ax=ax, orientation='horizontal', pad=0.05, shrink=0.8)
-    cbar.set_label('Precipitation (mm)')
-
-    # Set the colorbar ticks
-    cbar.set_ticks([0] + np.linspace(1, 1000, num=6).tolist())  # Include 0, then regular intervals
-    cbar.set_ticklabels(['0'] + [f'{int(tick)}' for tick in np.linspace(1, 1500, num=6)])  # Format tick labels
 
 
-    resol = '50m'  # use data at this scale
-    bodr = cfeature.NaturalEarthFeature(category='cultural', 
-            name='admin_0_boundary_lines_land', scale=resol, facecolor='none', alpha=0.7)
-    land = cfeature.NaturalEarthFeature('physical', 'land', \
-            scale=resol, edgecolor='k', facecolor=cfeature.COLORS['land'])
-    ocean = cfeature.NaturalEarthFeature('physical', 'ocean', \
-            scale=resol, edgecolor='none', facecolor=cfeature.COLORS['water'])
-    lakes = cfeature.NaturalEarthFeature('physical', 'lakes', \
-            scale=resol, edgecolor='lightsteelblue', facecolor=cfeature.COLORS['water'])
-    rivers = cfeature.NaturalEarthFeature('physical', 'rivers_lake_centerlines', \
-            scale=resol, edgecolor='lightsteelblue', facecolor='none')
 
-    ax.add_feature(rivers, linewidth=0.5)
-    ax.add_feature(bodr, linestyle='--', edgecolor='k', alpha=1)
 
-    rgb_shp.plot(ax=ax, transform=ccrs.PlateCarree(), color="grey", alpha=0.3, zorder=1000)
-    # Set title
-    fig.suptitle(f'TC Associated Precipitation from {SOURCE} ({START_YR}-{END_YR})')
 
-    # set tight layout
-    fig.tight_layout()
-    # Show the plot
-    plt.show()
 
-## construct a timeseries of swaths ##
-# take average o
-# make overall timeseries
 
-# make TC precip timeseries
 
-# now subtract out all of the TC precip 
+df = pd.read_csv("/nfs/turbo/seas-hydro/laratt/historic_precip/mexico_basin_totals.csv")
+df['time'] = pd.to_datetime(df['time'])
+# Extract the year from the 'time' column
+df['year'] = df['time'].dt.year
+# Group by 'year' and sum the values for each category
+annual_precipitation = df.groupby('year')[['Total', 'Non TC', 'TC']].sum()
 
-# take an average over the length of the desired timeseries
+deliveries['year'] = deliveries['date'].dt.year
+# Filter for years between 2000 and 2019
+filtered_deliveries = deliveries[(deliveries['date'] >= '2000-06-01') & (deliveries['date'] <= '2019-12-31')]
+# Group by 'year' and sum the 'flow' values to get the total flow per year
+annual_flow = filtered_deliveries.groupby('year')['flow'].sum().reset_index()
 
-# make overall timeseries of precip minus TCs
+# Create the figure and axis
+fig, ax = plt.subplots(figsize=(12, 6))
+# Plot 'non_tc' and 'tc' as stacked bars on top of each other
+annual_precipitation[['Non TC', 'TC']].plot(kind='bar', stacked=True, ax=ax, position=0, width=0.3,
+                                            color=[IBM_BLUE, IBM_PURPLE],label=['Non TC', 'TC'])
+ax.axhline(np.mean(annual_precipitation.Total),ls='--',label='Average Total',color='k')
+# Set plot labels and title
+ax.set_title('Annual Total Precipitation in Mexican Portion',loc='left')
+ax.set_xlabel('Year')
+ax.set_ylabel('Precipitation (mm)')
+# Rotate x-tick labels for better readability
+#ax.set_xticklabels(rotation=45)
+# Add legend to the plot
+ax.legend(ncols=4,frameon=False,loc='upper left',bbox_to_anchor=(0.63,1.11))
+# Create a twin axis for plotting a second bar chart
+ax2 = ax.twinx()
+# Plot the 'total' as a bar chart on the secondary axis (twin axis)
+annual_flow['flow'].plot(kind='bar', ax=ax2, color=IBM_PINK, width=0.3, position=1, label='Annual Deliveries')
+# Set labels for the secondary axis
+ax2.set_ylabel('Annual Deliveries MCM)', color=IBM_PINK)
+ax2.tick_params(axis='y', labelcolor=IBM_PINK)
+
+fig.savefig('precip_test.png')
+
+
+# Assuming 'filtered_deliveries' and 'df' are already defined
+# Calculate cross-correlation
+correlation = correlate(filtered_deliveries.flow, df.TC, mode='full')
+
+# Get the full range of lags
+lags = np.arange(-len(df.TC) + 1, len(df.TC))  # Full range of lags (-len + 1 to len)
+
+# Only consider non-negative lags (0 to len(df.TC)-1)
+non_negative_lags = lags[lags >= 0]
+correlation_non_negative = correlation[lags >= 0]
+
+# Min-Max normalization: scale to [0, 1]
+min_corr = np.min(correlation_non_negative)
+max_corr = np.max(correlation_non_negative)
+
+# Min-Max normalize the correlation
+min_max_normalized_correlation = (correlation_non_negative - min_corr) / (max_corr - min_corr)
+
+# Find the lag with maximum Min-Max correlation
+max_lag = non_negative_lags[np.argmax(min_max_normalized_correlation)]
+print(f"Maximum Min-Max normalized correlation occurs at lag: {max_lag} days")
+
+# Define a window of 20 days around the max lag
+window_size = 20
+window_start = max_lag - window_size // 2
+window_end = max_lag + window_size // 2 + 1
+
+# Ensure the window is within the bounds of the available non-negative lags
+window_start = max(window_start, 0)  # Ensure no negative lags
+window_end = min(window_end, len(min_max_normalized_correlation))  # Ensure it doesn't exceed the correlation array length
+
+# Crop the lags and Min-Max normalized correlation to the window of interest
+lags_window = non_negative_lags[(non_negative_lags >= window_start) & (non_negative_lags < window_end)]
+correlation_window = min_max_normalized_correlation[(non_negative_lags >= window_start) & (non_negative_lags < window_end)]
+
+# Create a figure and axis
+fig, ax = plt.subplots(figsize=(14, 6))
+
+# Plot the Min-Max normalized cross-correlation for the 20-day window
+ax.plot(lags_window, correlation_window, label='Min-Max Normalized Cross-Correlation', color='tab:blue')
+
+# Plot the maximum correlation line
+ax.axvline(max_lag, color='tab:pink', linestyle='--', label=f'Max Min-Max Normalized Correlation at Lag {max_lag} days')
+
+# Set labels and title
+ax.set_title('Cross-Correlation Between Daily Deliveries and Daily Mexican TC Precipitation', fontsize=14)
+ax.set_xlabel('Lag (days)', fontsize=12)
+ax.set_ylabel('Min-Max Normalized Correlation', fontsize=12)
+
+# Add a legend
+ax.legend()
+
+# Save the figure
+fig.savefig('corr_20_day_window.png')
+
+
+
+
+#### Cumulative Plots for each cycle with precip ####
+fig9, ax9 = plt.subplots(1,1,figsize=(18,8)) # 2002-10-01 to 2007-09-30
+elevation_vs_precip(cleaned_deliveries,mexico_data,ax=ax9,ylab='Deliveries (TCM)',title='Mexican Basin TC Precipitation vs Cumulative Deliveries',
+                    start_time='2010-10-25',end_time='2015-10-25',nonTC=True,target=[('2010-10-25','2015-10-25')])
+plot_targets(targets=targets,start_date='2010-10-25',end_date='2015-10-24',ax=ax9,yscale=2.1e6,dday=4,resets=None)
+ax9.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
+#shade_by_index(ax5,MEI,start_time='2002-09-01')
+fig9.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/just_mexico/cumulative_deliveries_2010-10-25_2015-10-25.png")
+
+
+#### Example delivery cycles vs total deliveries #####
+fig3, ax3 = plt.subplots(1,1,figsize=(18,8)) # 2002-10-01 to 2007-09-30
+elevation_vs_precip(cleaned_deliveries,mexico_data,ax=ax3,ylab='Deliveries (m^3/day)',start_time='2002-09-01',nonTC=True)
+plot_resets(ax3,['2002-10-01'],yscale=3.2e7,dday=4)
+ax3.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
+#shade_by_index(ax3,MEI,start_time='2002-09-01')
+fig3.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/deliveries_2002-10-01_2007-09-30.png")
+
+fig4, ax4 = plt.subplots(1,1,figsize=(18,8)) # 2007-10-01 - 10-08-2008, 07-13-2010 to 10-24-2010
+elevation_vs_precip(cleaned_deliveries,mexico_data,ax=ax4,start_time='2007-10-01',nonTC=True,
+                    end_time='2010-10-24',ylab='Deliveries (m^3/day)',title='Mexico Basin TC Precipitation vs Deliveries')
+plot_resets(ax4,yscale=0.8e8)
+ax4.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
+#shade_by_index(ax4,MEI,start_time='2007-10-01',end_time='2010-10-24')
+fig4.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/just_mexico/deliveries_2007-10-01_2010-10-24.png")
+
+#### Cumulative Plots for each cycle with precip ####
+fig5, ax5 = plt.subplots(1,1,figsize=(18,8)) # 2002-10-01 to 2007-09-30
+elevation_vs_precip(cleaned_deliveries,mexico_data,ax=ax5,ylab='Deliveries (TCM)',title='Mexican Basin TC Precipitation vs Cumulative Deliveries',
+                    start_time='2002-09-01',nonTC=True,target=[('2002-09-01','2002-10-01'),('2002-10-01','2007-09-30')])
+plot_targets(targets=targets,start_date='2002-09-01',ax=ax5,resets=['2002-10-01'],yscale=2.1e6,dday=4)
+ax5.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
+#shade_by_index(ax5,MEI,start_time='2002-09-01')
+fig5.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/just_mexico/cumulative_deliveries_2002-10-01_2007-09-30.png")
+
+
+fig6, ax6 = plt.subplots(1,1,figsize=(18,8)) # 2002-10-01 to 2007-09-30
+elevation_vs_precip(cleaned_deliveries,mexico_data,ax=ax6,ylab='Cumulative Cycle Deliveries (TCM)',
+                    start_time='2007-10-01',end_time='2010-10-24',nonTC=True,title='Mexican Basin TC Precipitation vs Cumulative Deliveries',
+                    target=[('2007-10-01','2008-08-10'),('2008-08-10','2008-10-28'),('2008-10-28','2009-02-28'),('2009-02-28','2010-10-24')])
+# '2008-08-10','2008-10-28','2009-02-28'
+plot_targets(targets=targets,start_date='2007-10-01',end_date='2010-10-24',ax=ax6,resets=['2008-08-10','2008-10-28','2009-02-28'],yscale=2.0e6,dday=4)
+ax6.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
+#shade_by_index(ax5,MEI,start_time='2002-09-01')
+fig6.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/just_mexico/cumulative_deliveries_2007-10-01_2010-10-24.png")
+
+
+#### Correlation Plots ####
+
+#client.close()
+
+
+
+
+
+
+#### Example delivery cycles vs reservoir storage #####
+fig1, ax1 = plt.subplots(1,1,figsize=(18,8)) # 2002-10-01 to 2007-09-30
+elevation_vs_precip(cleaned_rivers,ds,ax=ax1,start_time='2002-09-01',nonTC=True,title='Total Basin TC Precipitation vs Reservoir Levels')
+plot_resets(ax1,['2002-10-01'],yscale=3e6,dday=4)
+ax1.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
+fig1.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/full_basin/reservoirs_2002-10-01_2007-09-30.png")
+
+
+fig2, ax2 = plt.subplots(1,1,figsize=(18,8)) # 2007-10-01 - 10-08-2008, 07-13-2010 to 10-24-2010
+elevation_vs_precip(cleaned_rivers,ds,ax=ax2,start_time='2007-10-01',end_time='2010-10-24',nonTC=True,title='Total Basin TC Precipitation vs Reservoir Levels')
+plot_resets(ax2)
+ax2.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
+fig2.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/full_basin/reservoirs_2007-10-01_2010-10-24.png")
+
+
+#### Example delivery cycles vs total deliveries #####
+fig3, ax3 = plt.subplots(1,1,figsize=(18,8)) # 2002-10-01 to 2007-09-30
+elevation_vs_precip(cleaned_deliveries,ds,ax=ax3,ylab='Deliveries (m^3/day)',start_time='2002-09-01',nonTC=True,title='Total Basin TC Precipitation vs Deliveries')
+plot_resets(ax3,['2002-10-01'],yscale=3.2e7,dday=4)
+ax3.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
+#shade_by_index(ax3,MEI,start_time='2002-09-01')
+fig3.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/full_basin/deliveries_2002-10-01_2007-09-30.png")
+
+fig4, ax4 = plt.subplots(1,1,figsize=(18,8)) # 2007-10-01 - 10-08-2008, 07-13-2010 to 10-24-2010
+elevation_vs_precip(cleaned_deliveries,ds,ax=ax4,start_time='2007-10-01',nonTC=True,
+                    end_time='2010-10-24',ylab='Deliveries (m^3/day)',title='Total Basin TC Precipitation vs Total Deliveries to US')
+plot_resets(ax4,yscale=0.8e8)
+ax4.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
+#shade_by_index(ax4,MEI,start_time='2007-10-01',end_time='2010-10-24')
+fig4.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/full_basin/deliveries_2007-10-01_2010-10-24.png")
+
+#### Cumulative Plots for each cycle with precip ####
+fig5, ax5 = plt.subplots(1,1,figsize=(18,8)) # 2002-10-01 to 2007-09-30
+elevation_vs_precip(cleaned_deliveries,ds,ax=ax5,ylab='Deliveries (TCM)',title='Total Basin TC Precipitation vs Cumulative Deliveries',
+                    start_time='2002-09-01',nonTC=True,target=[('2002-09-01','2002-10-01'),('2002-10-01','2007-09-30')])
+plot_targets(targets=targets,start_date='2002-09-01',ax=ax5,resets=['2002-10-01'],yscale=2.1e6,dday=4)
+ax5.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
+#shade_by_index(ax5,MEI,start_time='2002-09-01')
+fig5.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/full_basin/cumulative_deliveries_2002-10-01_2007-09-30.png")
+
+
+fig6, ax6 = plt.subplots(1,1,figsize=(18,8)) # 2002-10-01 to 2007-09-30
+elevation_vs_precip(cleaned_deliveries,ds,ax=ax6,ylab='Cumulative Cycle Deliveries (TCM)',
+                    start_time='2007-10-01',end_time='2010-10-24',nonTC=True,title='Total Basin TC Precipitation vs Cumulative Deliveries',
+                    target=[('2007-10-01','2008-08-10'),('2008-08-10','2008-10-28'),('2008-10-28','2009-02-28'),('2009-02-28','2010-10-24')])
+# '2008-08-10','2008-10-28','2009-02-28'
+plot_targets(targets=targets,start_date='2007-10-01',end_date='2010-10-24',ax=ax6,resets=['2008-08-10','2008-10-28','2009-02-28'],yscale=2.0e6,dday=4)
+ax6.legend(ncols=5, frameon=False, loc='upper left',bbox_to_anchor=(0.63,1.045))
+#shade_by_index(ax5,MEI,start_time='2002-09-01')
+fig6.savefig("/nfs/turbo/seas-hydro/laratt/historic_precip/figures/water_resources/full_basin/cumulative_deliveries_2007-10-01_2010-10-24.png")
+

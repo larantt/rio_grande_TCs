@@ -332,3 +332,263 @@ if PLOT_ALL_SWATHS:
 # take an average over the length of the desired timeseries
 
 # make overall timeseries of precip minus TCs
+
+
+
+
+from sklearn.linear_model import TheilSenRegressor
+# Define a function to compute Thiel-Sen's slope and Mann-Kendall p-value for a given time series
+def thiel_sen_slope_and_pvalue(time_series):
+    """
+    Calculate the Thiel-Sen slope and the Mann-Kendall p-value for a given time series.
+    """
+    # Convert DataArray to numpy array
+    time_series_np = time_series.values  # Convert DataArray to numpy array
+    
+    # Handle NaN values in time_series (e.g., replace NaNs with 0 or remove them)
+    # Option 1: Replace NaNs with 0 (useful if you want to keep the data intact)
+    time_series_np = np.nan_to_num(time_series_np, nan=0.0)
+    
+    # Option 2: Alternatively, remove NaN values by filtering
+    # time_series_np = time_series_np[~np.isnan(time_series_np)]
+    
+    # Create time points (0, 1, 2, ..., N-1)
+    time_points = np.arange(len(time_series_np))
+    
+    # Reshape the time series to a 2D array (samples, features) for scikit-learn
+    time_series_reshaped = time_series_np.reshape(-1, 1)  # Make it 2D for the regressor (N x 1)
+    
+    # Initialize and fit ThielSenRegressor
+    ts_regressor = TheilSenRegressor()
+    ts_regressor.fit(time_points.reshape(-1, 1), time_series_np)  # Fit the model with reshaped y
+    
+    # Extract the slope (coefficient)
+    slope = ts_regressor.coef_[0]
+    
+    # Mann-Kendall test using Kendall's Tau for trend significance
+    tau, p_value = stats.kendalltau(time_points, time_series_np)  # Kendall's Tau and p-value
+    
+    return slope, p_value
+
+import scipy.stats as stats
+# Step 1: Define a function to compute Thiel-Sen's slope and p-value using scipy
+def thiel_sen_slope_and_pvalue(time_series):
+    # 'time_series' is an array of precipitation contributions for a single grid cell
+    time_points = np.arange(len(time_series))  # Create time indices as 0, 1, 2, ..., N-1
+    print(time_points)
+    print(time_series)
+    
+    # Compute the Thiel-Sen estimator using scipy's theilslopes
+    slope, intercept, lower_slope, upper_slope = stats.theilslopes(time_series, time_points)
+    
+    # Perform the Mann-Kendall test using Kendall's Tau (tau) for the significance of the trend
+    tau, p_value = stats.kendalltau(time_points, time_series)
+    
+    return slope, p_value
+
+# Step 2: Create a dictionary to store the results for each month (June-November)
+results = {}
+
+# Loop over the months (June to November)
+for month in [6]:
+    # Step 2a: Subset data for the current month across the 20-year period
+    mask_month = pct_contrib.time.dt.month == month
+    subset_month = pct_contrib.sel(time=mask_month)
+
+    # Step 2b: Apply the Thiel-Sen function to each grid cell using xarray's apply_ufunc
+    slope_da, p_value_da = xr.apply_ufunc(
+        thiel_sen_slope_and_pvalue, 
+        subset_month, 
+        input_core_dims=[['time']],  # Apply the function along the 'time' dimension
+        output_core_dims=[[], []],  # We expect two outputs: the slope and p-value
+        vectorize=True,  # Vectorize to avoid explicit loops
+        dask="allowed",  # This allows for parallel computation if the array is large
+        output_dtypes=[np.float32, np.float32]  # Ensure correct output types for slope and p-value
+    )
+
+    # Step 2c: Store the results for this month
+    month_name = {6: 'June', 7: 'July', 8: 'August', 9: 'September', 10: 'October', 11: 'November'}
+    results[month_name[month]] = {
+        'slope': slope_da,
+        'p_value': p_value_da
+    }
+
+
+def theil_ufunc(da, dim="time", alpha=0.1):
+    """theil sen slope for xarray
+
+    Wraps sp.stats.theilslopes in xr.apply_ufunc
+
+    Parameters
+    ==========
+    da : xr.DataArray
+        DataArray to calculate the theil sen slope over
+    dim : list of str, optional
+        Dimensions to reduce the array over. Default: "time"
+    alpha : float, optional
+        Significance level in [0, 0.5].
+
+    Returns
+    =======
+    slope : xr.DataArray
+        Median slope of the array
+    significance : xr.DataArray
+        Array indicating significance. True if significant,
+        False otherwise
+    """
+
+    def theil_(pt, alpha):
+
+        isnan = np.isnan(pt)
+        # return NaN for all-nan vectors
+        if isnan.all():
+            return np.nan, np.nan
+
+        # use masked-stats if any is nan
+        if isnan.any():
+            pt = np.ma.masked_invalid(pt)
+            slope, inter, lo_slope, up_slope = stats.theilslopes(
+                pt, alpha=alpha
+            )
+
+        else:
+            slope, inter, lo_slope, up_slope = stats.theilslopes(pt, alpha=alpha)
+
+        # theilslopes does not return siginficance but a
+        # confidence interval assume it is significant
+        # if both are on the same side of 0
+        significance = np.sign(lo_slope) == np.sign(up_slope)
+
+        return slope, significance
+
+    kwargs = dict(alpha=alpha)
+    dim = [dim] if isinstance(dim, str) else dim
+
+    # use xr.apply_ufunc to handle vectorization
+    theil_slope, theil_sign = xr.apply_ufunc(
+        theil_,
+        da,
+        input_core_dims=[dim],
+        vectorize=True,
+        output_core_dims=((), ()),
+        kwargs=kwargs,
+        dask='allowed'
+    )
+
+    return theil_slope, theil_sign
+
+
+def dask_linreg(DataArray, times = None, count_thresh = None, time_delta_min = None):
+    """
+    Apply linear regression to DataArray.
+    Returns np.nan if valid pixel count less than count_thresh
+    and/or difference between first and last time stamp less than time_delta_min.
+    
+    Default value for time_delta_min assumes times are provided in days.
+    """
+    mask = ~np.isnan(DataArray)
+    
+    if count_thresh:
+        if np.sum(mask) < count_thresh:
+            return np.nan, np.nan
+    
+    if time_delta_min:
+        time_delta = max(times[mask]) - min(times[mask])
+        if time_delta < time_delta_min:
+            return np.nan, np.nan
+
+#     m = linear_model.LinearRegression()
+    m = linear_model.TheilSenRegressor()
+    m.fit(times[mask].reshape(-1,1), DataArray[mask])
+    
+    return m.coef_[0], m.intercept_
+
+def dask_apply_linreg(DataArray, dim, kwargs=None):
+
+    # TODO check if da.map_blocks is faster / more memory efficient
+    # using da.apply_ufunc for now.
+    # da.map_blocks can handle chunked time dim blocks. 
+    results = xr.apply_ufunc(
+        dask_linreg,
+        DataArray,
+        kwargs=kwargs,
+        input_core_dims=[[dim]],
+        output_core_dims=[[],[]],
+        vectorize=True,
+        dask="parallelized",)
+    return results
+
+
+# do a linear regression
+# try at la boquilla
+laboq_lat = 27.544766666666
+laboq_lon =  -105.4143472222
+
+# Fit a linear regression along the "time" dimension
+#pct_contrib = ((ds_annual_sum['total'] - ds_annual_sum['precipitation'])/ds_annual_sum['total']) * 100
+tc_precip = ds_annual_sum['total'] - ds_annual_sum['precipitation']
+trend = tc_precip.polyfit("time", 1,skipna=True)
+# Extract the slope (trend)
+slope = trend.polyfit_coefficients.sel(degree=1)
+p_value = stats.ttest_1samp(slope.values, 0).pvalue
+
+fig,ax = plt.subplots(1,1,figsize=(12,8),subplot_kw={'projection':ccrs.PlateCarree()})
+p = plot_cartopy(ax,slope,f'Linear Trend in Precipitation,(2000-2019)',vmax=4e-17,vmin=-4e-17,cmap='seismic')
+cb1 = fig.colorbar(p, ax=ax, extend='both')
+
+laboq = tc_precip.sel(lat=laboq_lat, lon=laboq_lon, method='nearest')
+
+
+fig,ax = plt.subplots(1,1,figsize=(12,8))
+ax.plot(np.arange(2000,2020,1), laboq.values, c=IBM_BLUE, lw=3)
+ax.set_title('Monthly Precipitation Contribution by TCs at La Boquilla (%)')
+
+
+
+for year in np.arange(2000,2020,1):
+    fig,ax = plt.subplots(1,1,figsize=(12,8), subplot_kw={'projection': ccrs.PlateCarree()})
+    pct_contrib = ((ds_annual_sum['total'] - ds_annual_sum['precipitation'])/ds_annual_sum['total']) * 100
+    p = plot_cartopy(ax, pct_contrib.sel(time=f'{year}').isel(time=0), f'Percentage Contribution of TCs to Total Precipitation {year}',cmap='Blues',levs=11)
+    cb1 = fig.colorbar(p, ax=ax, extend='max')
+    fig.savefig(f'/nfs/turbo/seas-hydro/laratt/historic_precip/figures/total_yrs/annual_{year}.png')
+
+    # Loop through each month to create the 6-panel plot
+    fig, ax = plt.subplots(2, 3, figsize=(19, 6), subplot_kw={'projection': ccrs.PlateCarree()})
+    # get percentage contribution of TCs to precipitation
+    pct_contrib = ((ds_monthly_sum['total'] - ds_monthly_sum['precipitation'])/ds_monthly_sum['total']) * 100
+
+    for month,axs in zip(np.arange(5,12),ax.flatten()):  # Iterate over each month
+        data = pct_contrib.sel(time=f'{year}-{month + 1}') # take a monthly mean
+        print(f'plotting {months[month]}, year {year}')
+        # Create the 3-panel plot
+        
+        p = plot_cartopy(axs, data.isel(time=0), f'{months[month]}',cmap='Blues',levs=11)
+
+    fig.subplots_adjust(hspace=0.1,wspace=0.1,right=0.85)
+    cbar_ax = fig.add_axes([0.87, 0.1, 0.01, 0.78])
+    cb1 = fig.colorbar(p, cax=cbar_ax, extend='max') 
+    cb1.set_label('TC Contribution to Total Precipitation (%)')
+    fig.suptitle(f'IMERG-3B TC Contribution (%) to Total Precipitation ({year})',fontweight='bold',fontsize=16)
+    fig.savefig(f'/nfs/turbo/seas-hydro/laratt/historic_precip/figures/total_yrs/monthly_{year}.png')
+
+# spatially calculate trend in percentage contribution data
+
+# Loop through each month to create the 3-panel plot
+for month in np.arange(5,12):  # Iterate over each month
+    data = ds_monthly_mean.isel(month=month)
+    
+    total = data['total']
+    precipitation = data['precipitation']
+    difference = precipitation - total
+    diff_max = np.ceil(np.nanmax(total.values))
+    diff_min = np.floor(np.nanmin(difference.values)) if np.floor(np.nanmin(difference.values)) < 0 else -0.1
+    print(f'plotting {month}')
+    # Create the 3-panel plot
+    fig, axs = plt.subplots(1, 3, figsize=(19, 6), subplot_kw={'projection': ccrs.PlateCarree()})
+    
+    plot_cartopy(axs[0], total, f'Average Total Precip - {months[month]}',vmax=diff_max)
+    plot_cartopy(axs[1], precipitation, f'Average Non TC Precip  - {months[month]}',vmax=diff_max)
+    plot_cartopy(axs[2], difference, f'Average TC Precip Loss - {months[month]}', cmap='gist_heat',vmax=0.0,vmin=diff_min)
+    
+    fig.tight_layout()
+    fig.savefig(f'/nfs/turbo/seas-hydro/laratt/historic_precip/figures/precip_{months[month]}_spatial.png')

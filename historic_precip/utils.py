@@ -9,10 +9,33 @@ import cartopy.crs as ccrs
 import cartopy.feature as cfeature
 from datetime import datetime
 import xarray as xr
+import pyproj
 
 #---------------------------#
 # Data Processing Functions #
 #---------------------------#
+
+def latlon_to_lcc(lat, lon, proj_crs):
+    """
+    Transforms geographic coordinates (latitude, longitude) to Lambert Conformal Conic coordinates.
+    
+    Parameters
+    ----------
+    lat : float
+        Latitude of the point.
+    lon : float
+        Longitude of the point.
+    proj_crs : pyproj.CRS
+        The Lambert Conformal Conic projection system.
+    
+    Returns
+    -------
+    x, y : float
+        Transformed coordinates in the Lambert Conformal Conic projection.
+    """
+    transformer = pyproj.Transformer.from_crs("EPSG:4326", proj_crs, always_xy=True)
+    x, y = transformer.transform(lon, lat)  # Convert from lon, lat to x, y
+    return x, y
 
 def normalize_longitude(lon):
     """Normalize longitude to be within the range [-180, 180]."""
@@ -289,7 +312,7 @@ def mask_TC_precip(precip_df,EBT_df,track_id,shp_influence,return_swath=False):
 # Data Visualisation Functions #
 #------------------------------#
 
-def plot_tracks(data,ax, lower_norm=10, upper_norm=50, map='ws',col='lightsteelblue'):
+def plot_tracks(data,ax, lower_norm=10, upper_norm=50, map='ws',col='lightsteelblue',circ=True):
     """
     Makes a plot of any given TC tracks in a track dataframe
     """
@@ -323,10 +346,10 @@ def plot_tracks(data,ax, lower_norm=10, upper_norm=50, map='ws',col='lightsteelb
 
             norm = Normalize(vmin=lower_norm, vmax=upper_norm)
 
-            if track_df.name.unique() == 'ALEX_2010':
+            if (track_df.name.unique() == 'ALEX_2010') or (circ==True):
                 for i in range(len(longitudes) - 1):
                 # Choose color based on wind speed
-                    color = 'indianred'  # Choose colormap
+                    color = 'k'  # Choose colormap
                 
                     # Plot line segment
                     ax.plot([longitudes[i], longitudes[i + 1]], [latitudes[i], latitudes[i + 1]], color=color, linewidth=2, transform=ccrs.PlateCarree())
@@ -337,7 +360,7 @@ def plot_tracks(data,ax, lower_norm=10, upper_norm=50, map='ws',col='lightsteelb
                         radius_lon_deg = track_df.rsize.values[i] / (111.0 * np.cos(np.deg2rad(latitudes[i])))  # Conversion from km to degrees longitude based on latitude
 
                         # Plot circle at the center
-                        circle = plt.Circle((longitudes[i], latitudes[i]), radius_lon_deg, edgecolor='blue', facecolor='none', transform=ccrs.PlateCarree())
+                        circle = plt.Circle((longitudes[i], latitudes[i]), radius_lon_deg, edgecolor='k', facecolor='none', transform=ccrs.PlateCarree())
                         ax.add_patch(circle)
 
             else:
@@ -614,21 +637,47 @@ def daily_radial_precip(centers, times, ds, precip_var='precipitation', lat_var=
         
         # Apply radial masking for each center within the same day
         for lon, lat in day_centers:
-            mask = radial_mask(lon, lat, lon_array, lat_array, radius).T
-            daily_mask = np.logical_or(daily_mask, mask)  # Combine the masks without overlap
+            try:
+                mask = radial_mask(lon, lat, lon_array, lat_array, radius)
+                daily_mask = np.logical_or(daily_mask, mask)  # Combine the masks without overlap
+            except:
+                mask = radial_mask(lon, lat, lon_array, lat_array, radius).T
+                daily_mask = np.logical_or(daily_mask, mask)  # Combine the masks without overlap
+
 
         # Mask the daily precip
         precip_masked = np.where(daily_mask, tp, np.nan)
         
         # Append the masked precipitation for the current day to the list
-        daily_precip_list.append(precip_masked)
+        daily_precip_list.append(precip_masked.T)
 
     # Convert the list of daily precipitation into an xarray DataArray
-    daily_precip_da = xr.DataArray(
+    unique_days = pd.to_datetime(unique_days)
+
+    # make times cf compliant
+    base_time = pd.to_datetime('1900-01-01')  # 
+
+    # Convert the time to a numeric value (e.g., days since base_time)
+    time_delta = unique_days - base_time
+    time_values = time_delta.total_seconds() / (24 * 3600)  # Convert to days
+
+    """daily_precip_da = xr.DataArray(
         np.stack(daily_precip_list, axis=0),
         coords={"time": unique_days, lon_var: ds[lon_var], lat_var: ds[lat_var]},
         dims=["time", lon_var, lat_var]
+    )"""
+
+    daily_precip_da = xr.DataArray(
+        np.stack(daily_precip_list, axis=0),
+        coords={"time": time_values, lon_var: ds[lon_var], lat_var: ds[lat_var]},
+        dims=["time", lon_var, lat_var]
     )
+
+    # Assign CF-compliant attributes to the time coordinate
+    daily_precip_da.coords["time"].attrs = {
+        "units": f"days since {base_time.strftime('%Y-%m-%d')}",
+        "calendar": "gregorian",  # You can change the calendar if needed
+    }
 
     # Create a dataset with daily precipitation
     daily_precip_dataset = xr.Dataset({precip_var: daily_precip_da})
@@ -739,6 +788,110 @@ def mask_to_shp(shapefile,lon2d,lat2d,data_in,var='precipitation'):
         raise TypeError("data_in must be either a numpy array or an xarray DataArray.")
 
     return masked_data
+
+
+
+def radial_mask_lcc(central_x, central_y, x_array, y_array, radius=500):
+    """
+    Creates a radial mask for a given storm center in Lambert Conformal Conic coordinates.
+    
+    Parameters
+    ----------
+    central_x : float
+        x-coordinate (Lambert Conformal Conic) of the storm center.
+    central_y : float
+        y-coordinate (Lambert Conformal Conic) of the storm center.
+    x_array : np.array
+        Array of x (Lambert Conformal Conic) coordinates of the precipitation grid.
+    y_array : np.array
+        Array of y (Lambert Conformal Conic) coordinates of the precipitation grid.
+    radius : float
+        Radius in meters around the storm center (adjust if necessary).
+    
+    Returns
+    -------
+    mask : np.array
+        Boolean array where True represents points within the radius.
+    """
+    # Create 2D grids of x and y coordinates from the 1D arrays
+    x_grid, y_grid = np.meshgrid(x_array, y_array)
+    
+    # Calculate the distance from the center in the projected space (2D distance)
+    distances = np.sqrt((x_grid - central_x)**2 + (y_grid - central_y)**2)
+
+    # Mask points within the radius
+    mask = distances <= radius
+    return mask
+
+
+
+def daily_radial_precip_lcc(centers, times, ds, precip_var='prcp', lat_var='lat', lon_var='lon', radius=500):
+    """
+    Function calculates daily accumulated precipitation within the area covered
+    by all storm centers (6-hourly) for each day, without double-counting overlapping areas.
+    
+    Parameters
+    ----------
+    centers : list of tuples
+        List of (lon, lat) tuples for each storm center.
+    times : pandas.Series
+        Series of datetime objects corresponding to each storm center.
+    precip_data : xarray.DataArray
+        Daily precipitation data array from netcdf.
+    radius : float
+        Radius to extract precipitation around each center (in km).
+    
+    Returns
+    -------
+    total_precip : xarray.DataArray
+        Total accumulated precipitation masked by the full area covered by the storm swaths.
+    daily_precip_dataset : xarray.Dataset
+        Dataset with time, lat, lon dimensions for daily precipitation.
+    """
+    # Group storm centers by day
+    unique_days = times.dt.floor('D').unique()
+
+    # Extract lons and lats from dataset (in projected space, Lambert Conformal Conic)
+    x_array = ds['x'].values
+    y_array = ds['y'].values
+
+    # Initialize an empty list to store daily masked precipitation data
+    daily_precip_list = []
+
+    # Iterate over each day and apply radial masking
+    for i, day in enumerate(unique_days):
+        # Get the centers for the current day
+        day_centers = [(lon, lat) for (lon, lat), time in zip(centers, times) if time.floor('D') == day]
+        
+        # Extract total precipitation for the current day
+        tp = ds[precip_var].sel(time=day, method='nearest').values
+        
+        # Initialize a mask for the current day (False means no precipitation to start)
+        daily_mask = np.zeros_like(tp, dtype=bool)
+        
+        # Apply radial masking for each center within the same day
+        for (lon, lat), (storm_x, storm_y) in zip(day_centers, centers):
+            mask = radial_mask_lcc(storm_x, storm_y, x_array, y_array, radius * 1000)  # Convert radius to meters
+            daily_mask = np.logical_or(daily_mask, mask)  # Combine the masks without overlap
+
+        # Mask the daily precip
+        precip_masked = np.where(daily_mask, tp, np.nan)
+        
+        # Append the masked precipitation for the current day to the list
+        daily_precip_list.append(precip_masked)
+
+    # Convert the list of daily precipitation into an xarray DataArray
+    daily_precip_da = xr.DataArray(
+        np.stack(daily_precip_list, axis=0),
+        coords={"time": unique_days, lon_var: ds[lon_var], lat_var: ds[lat_var]},
+        dims=["time", lon_var, lat_var]
+    )
+
+    # Create a dataset with daily precipitation
+    daily_precip_dataset = xr.Dataset({precip_var: daily_precip_da})
+
+    return daily_precip_dataset
+
 
 
 def memory_check():
