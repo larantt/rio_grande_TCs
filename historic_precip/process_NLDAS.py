@@ -261,11 +261,38 @@ ax.set_extent([-115.485103, -96.017329, 23.412489, 38.624836], crs=ccrs.PlateCar
 plot_on_map_with_stipple(fig, ax, rgb_annual_sum[MKVAR], 
                          slope, p_value,  
                          'NLDAS (1979-2020)', vmax=-10, div=True, 
-                         cmap='cmr.prinsenvlag', colorbar_label='Total Evaporation Trend (mm/yr)')
+                         cmap='cmr.viola', colorbar_label='Total Evaporation Trend (mm/yr)')
 
 ax.set_title(f'min: {np.nanmin(slope):.2f}  max: {np.nanmax(slope):.2f}',loc='right')
-fig.suptitle('Theil-Sen Precipitation Trends (mm/yr) & Mann-Kendall Significance < 0.05 (stippling)',fontweight='bold', ha='center',x=.55)
+fig.suptitle('Theil-Sen ET trend & Mann-Kendall Significance < 0.05 (stippling)',fontweight='bold', ha='center',x=.55)
 fig.tight_layout()
+fig.savefig('NLDAS_ET_trend.png')
+
+
+## - conduct mann-kendall significance test - ##
+slope,p_value = spatial_mann_kendall(rgb_annual_sum,"AVSFT")
+
+# plot the data
+fig, ax = plt.subplots(1, 1, figsize=(15, 8), subplot_kw={'projection': ccrs.LambertConformal(central_longitude=-100.0, central_latitude=42.5)})
+resol = '50m'  # use data at this scale
+bodr = cfeature.NaturalEarthFeature(category='cultural', 
+            name='admin_0_boundary_lines_land', scale=resol, facecolor='none', alpha=0.7)
+rivers = cfeature.NaturalEarthFeature('physical', 'rivers_lake_centerlines', 
+            scale=resol, edgecolor='lightsteelblue', facecolor='none')
+
+ax.add_feature(rivers, linewidth=0.5)
+ax.add_feature(bodr, linestyle='--', edgecolor='k', alpha=1)
+ax.set_extent([-115.485103, -96.017329, 23.412489, 38.624836], crs=ccrs.PlateCarree())
+
+plot_on_map_with_stipple(fig, ax, rgb_annual_sum['AVSFT'], 
+                         slope, p_value,  
+                         'NLDAS (1979-2020)', vmax=-2.5, div=True, 
+                         cmap='cmr.viola', colorbar_label='Average Surface Skin Temperature Trend (K)')
+
+ax.set_title(f'min: {np.nanmin(slope):.2f}  max: {np.nanmax(slope):.2f}',loc='right')
+fig.suptitle('Theil-Sen Average Skin Temperature trend & Mann-Kendall Significance < 0.05 (stippling)',fontweight='bold', ha='center',x=.55)
+fig.tight_layout()
+fig.savefig('NLDAS_AVST_trend.png')
 
 
 data_80_99 = rgb_data.sel(time=slice('1980-01-01','1999-12-31')).mean(dim='time')
@@ -287,4 +314,4 @@ ax2.plot(test_cell.year,test_cell.EVP.values,lw=3,c='indianred',label='Annual To
 ax2.set_title('Annual Total ET at 26.44,-99.10',loc='left',fontweight='bold')
 ax2.set_xlabel('year')
 ax2.set_ylabel('ET (mm/yr)')
-fig2.saefig('ET_La_Minita_timeseries.png')
+fig2.savefig('ET_La_Minita_timeseries.png')
